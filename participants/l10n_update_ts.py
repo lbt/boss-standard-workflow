@@ -26,6 +26,9 @@ and upload them to translation Git repositories.
     ts_urls(list):
         Optional list of urls of ts-devel rpms
 
+    l10n.branch(string):
+        Optional target branch in the l10n git repository
+
 :term:`Workitem` fields OUT
 
 :Returns:
@@ -85,16 +88,20 @@ class ParticipantHandler(BuildServiceParticipant, RepositoryMixin):
 
         wid.result = False
 
+        branch = 'master'
+        if wid.fields.l10n and wid.fields.l10n.branch:
+            branch = wid.fields.l10n.branch
+
         if wid.params.ts_urls:
-            self.get_ts_urls(wid.params.ts_urls)
+            self.get_ts_urls(wid.params.ts_urls, branch)
         if wid.fields.ts_urls:
-            self.get_ts_urls(wid.fields.ts_urls)
+            self.get_ts_urls(wid.fields.ts_urls, branch)
         if wid.fields.ev.package:
-            self.get_ts_obs(wid)
+            self.get_ts_obs(wid, branch)
 
         wid.result = True
 
-    def get_ts_urls(self, urls):
+    def get_ts_urls(self, urls, branch):
         """Fetch -ts-devel rpms from urls"""
 
         for url in urls:
@@ -109,10 +116,10 @@ class ParticipantHandler(BuildServiceParticipant, RepositoryMixin):
 
             packagename, version = os.path.basename(tsrpm).split("-ts-devel-")
             version = version.split("-")[0]
-            self.update_ts([tsrpm], packagename, version, tmpdir)
+            self.update_ts([tsrpm], packagename, version, tmpdir, branch)
             shutil.rmtree(tmpdir)
 
-    def get_ts_obs(self, wid):
+    def get_ts_obs(self, wid, branch):
         """Fetch -ts-devel rpms from obs to tmpdir"""
 
         tmpdir = mkdtemp()
@@ -139,10 +146,10 @@ class ParticipantHandler(BuildServiceParticipant, RepositoryMixin):
                                  tsbin, tmpdir)
             tsrpms.append(os.path.join(tmpdir, tsbin))
 
-        self.update_ts(tsrpms, packagename, version, tmpdir)
+        self.update_ts(tsrpms, packagename, version, tmpdir, branch)
         shutil.rmtree(tmpdir)
 
-    def update_ts(self, tsrpms, packagename, version, tmpdir):
+    def update_ts(self, tsrpms, packagename, version, tmpdir, branch):
         """Extract ts files from RPM and put them in GIT."""
 
         workdir = os.path.join(tmpdir, packagename)
@@ -157,13 +164,13 @@ class ParticipantHandler(BuildServiceParticipant, RepositoryMixin):
             return
 
         try:
-            projectdir = self.init_gitdir(packagename)
+            projectdir = self.init_gitdir(packagename, branch)
         except CalledProcessError:
             # invalidate cache and try once again
             self.log.warning("Caught a git error. Removing local git repo and trying again...")
             shutil.rmtree(os.path.join(self.gitconf["basedir"], packagename),
                           ignore_errors=True)
-            projectdir = self.init_gitdir(packagename)
+            projectdir = self.init_gitdir(packagename, branch)
 
         tpldir = os.path.join(projectdir, "templates")
         if not os.path.isdir(tpldir):
@@ -182,7 +189,7 @@ class ParticipantHandler(BuildServiceParticipant, RepositoryMixin):
         check_call(["git", "commit", "-m",
                     "%s translation templates update for %s" % ( self.gitconf['vcs_msg_prefix'], version)],
                    cwd=projectdir)
-        check_call(["git", "push", "origin", "master"], cwd=projectdir)
+        check_call(["git", "push", "origin", branch], cwd=projectdir)
 
         # auto-create/update Pootle translation projects
         l10n_auth = (self.l10n_conf["username"], self.l10n_conf["password"])
@@ -201,7 +208,7 @@ class ParticipantHandler(BuildServiceParticipant, RepositoryMixin):
                              verify=False)
         assert resp.status_code == 201
 
-    def init_gitdir(self, reponame):
+    def init_gitdir(self, reponame, branch):
         """Initialize local clone of remote Git repository."""
 
         gitdir = os.path.join(self.gitconf["basedir"], reponame)
@@ -235,5 +242,17 @@ class ParticipantHandler(BuildServiceParticipant, RepositoryMixin):
                        cwd=self.gitconf["basedir"])
         else:
             check_call(["git", "fetch"], cwd=gitdir)
-            check_call(["git", "rebase", "origin/master"], cwd=gitdir)
+
+        remote_branch = "origin/%s" % branch
+        remote_branches = [
+            line.strip() for line in
+            check_output(["git", "branch", "-lr"]).splitlines()
+        ]
+        if remote_branch not in remote_branches:
+            remote_branch = "origin/master"
+
+        checkout_cmd = ["git", "checkout", "-B", branch]
+        if remote_branch:
+            checkout_cmd.append(remote_branch)
+        check_call(checkout_cmd, cwd=gitdir)
         return gitdir
